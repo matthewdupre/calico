@@ -348,10 +348,7 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests", testutils.DatastoreAll, f
 			By("Adding an IPPool with empty string for IPIPMode and VXLANMode and expecting it to be defaulted to 'Never'")
 
 			// Get the Calico backend client.
-			type accessor interface {
-				Backend() backendapi.Client
-			}
-			bc := c.(accessor).Backend()
+			bc := c.(backendapi.BackendAccessor).Backend()
 
 			// Add the IPPool through the backend so it skips setting default values
 			kvp := &model.KVPair{
@@ -976,6 +973,17 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests", testutils.DatastoreAll, f
 		})
 
 		It("should prevent pools from being created with bad block sizes", func() {
+			// The block size range is a CEL rule on the CRD, which with KDD is enforced by the apiserver.
+			expectRejected := func(err error) {
+				Expect(err).To(HaveOccurred())
+				if config.Spec.DatastoreType == apiconfig.EtcdV3 {
+					Expect(err).To(BeAssignableToTypeOf(errors.ErrorValidation{}))
+				} else {
+					Expect(err).To(BeAssignableToTypeOf(errors.ErrorDatastoreError{}))
+				}
+				Expect(err.Error()).To(ContainSubstring("blockSize must be between"))
+			}
+
 			_, err := c.IPPools().Create(ctx, &apiv3.IPPool{
 				ObjectMeta: metav1.ObjectMeta{Name: "ippool1"},
 				Spec: apiv3.IPPoolSpec{
@@ -983,9 +991,7 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests", testutils.DatastoreAll, f
 					BlockSize: 19,
 				},
 			}, options.SetOptions{})
-			Expect(err).To(HaveOccurred())
-			Expect(err).To(BeAssignableToTypeOf(errors.ErrorValidation{}))
-			Expect(err.Error()).To(ContainSubstring("block size must be between"))
+			expectRejected(err)
 
 			_, err = c.IPPools().Create(ctx, &apiv3.IPPool{
 				ObjectMeta: metav1.ObjectMeta{Name: "ippool1"},
@@ -994,9 +1000,7 @@ var _ = testutils.E2eDatastoreDescribe("IPPool tests", testutils.DatastoreAll, f
 					BlockSize: 33,
 				},
 			}, options.SetOptions{})
-			Expect(err).To(HaveOccurred())
-			Expect(err).To(BeAssignableToTypeOf(errors.ErrorValidation{}))
-			Expect(err.Error()).To(ContainSubstring("block size must be between"))
+			expectRejected(err)
 		})
 
 		It("should prevent the creation of a pool with an identical or overlapping CIDR using block sizes", func() {

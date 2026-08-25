@@ -35,9 +35,12 @@ static CALI_BPF_INLINE int try_redirect_to_peer(struct cali_tc_ctx *ctx)
 	struct cali_tc_state *state = ctx->state;
 	int rc = 0;
 	bool redirect_peer = GLOBAL_FLAGS & CALI_GLOBALS_REDIRECT_PEER;
+	/* Redirecting a SYN skips the destination's program, and with it the
+	 * policy that tc.c deliberately forces on every SYN. */
 	if (redirect_peer && ct_result_rc(state->ct_result.rc) == CALI_CT_ESTABLISHED_BYPASS &&
 			state->ct_result.ifindex_fwd != CT_INVALID_IFINDEX  &&
-			!(ctx->state->ct_result.flags & CALI_CT_FLAG_SKIP_REDIR_PEER)) {
+			!(ctx->state->ct_result.flags & CALI_CT_FLAG_SKIP_REDIR_PEER) &&
+			!is_tcp_syn(ctx)) {
 		if (CALI_F_L3_DEV) {
 			rc = make_room_for_l2_header(ctx);
 			if (rc < 0) {
@@ -211,8 +214,17 @@ skip_redir_ifindex:
 				.l4_protocol = state->ip_proto,
 			};
 
+			/* Only reply traffic of an external client hitting a local
+			 * service must carry EXT_TO_SVC_MARK into the FIB lookup so
+			 * the RPDB routes it back the way the request arrived. For
+			 * ordinary pod-originated egress the mark must stay 0 so a
+			 * host source-based routing rule (e.g. AWS VPC CNI's per-pod
+			 * rule) selects the pod's own interface. */
 			if (bpf_core_field_exists(((struct bpf_fib_lookup *)0)->mark)) {
-				fib_params(ctx)->mark = EXT_TO_SVC_MARK;
+				if (CALI_F_FROM_WEP && EXT_TO_SVC_MARK &&
+						(state->ct_result.flags & CALI_CT_FLAG_EXT_LOCAL)) {
+					fib_params(ctx)->mark = EXT_TO_SVC_MARK;
+				}
 			}
 
 #ifdef IPVER6
@@ -244,20 +256,21 @@ skip_redir_ifindex:
 			};
 			__u64 flags = 0;
 			__u32 size = 0;
+			/* Leave the tunnel key's local (outer/underlay source) address unset by
+			 * truncating the key before the local address.  bpf_skb_set_tunnel_key then
+			 * omits it and the kernel selects the source by routing to the remote VTEP,
+			 * i.e. the node's real underlay IP.  The overlay tunnel-device IP is not
+			 * underlay-routable and must never be the outer source: some fabrics (e.g.
+			 * GCP anti-spoof) drop packets sourced from it. */
 #ifdef IPVER6
-			ipv6_addr_t local_ip_copy = CALI_CONFIGURABLE(host_tunnel_ip);
-			if (ip_void(local_ip_copy)) {
-				local_ip_copy = CALI_CONFIGURABLE(host_ip);
-			}
 			ipv6_addr_t_to_be32_4_ip(key.remote_ipv6, &dest_rt->next_hop);
-			ipv6_addr_t_to_be32_4_ip(key.local_ipv6, &local_ip_copy);
 			flags |= BPF_F_TUNINFO_IPV6;
+			size = offsetof(struct bpf_tunnel_key, local_ipv6);
 #else
 			key.remote_ipv4 = bpf_htonl(dest_rt->next_hop);
-			key.local_ipv4 = ip_void(HOST_TUNNEL_IP) ? bpf_htonl(HOST_IP) : bpf_htonl(HOST_TUNNEL_IP);
 			flags |= BPF_F_ZERO_CSUM_TX;
+			size = offsetof(struct bpf_tunnel_key, local_ipv4);
 #endif
-			size = sizeof(struct bpf_tunnel_key);
 
 			int err = bpf_skb_set_tunnel_key(ctx->skb, &key, size, flags);
 			CALI_DEBUG("bpf_skb_set_tunnel_key %d nh " IP_FMT, err, &dest_rt->next_hop);
@@ -296,20 +309,21 @@ skip_redir_ifindex:
 
 			__u64 flags = 0;
 			__u32 size = 0;
+			/* Leave the tunnel key's local (outer/underlay source) address unset by
+			 * truncating the key before the local address.  bpf_skb_set_tunnel_key then
+			 * omits it and the kernel selects the source by routing to the remote VTEP,
+			 * i.e. the node's real underlay IP.  The overlay tunnel-device IP is not
+			 * underlay-routable and must never be the outer source: some fabrics (e.g.
+			 * GCP anti-spoof) drop packets sourced from it. */
 #ifdef IPVER6
-			ipv6_addr_t local_ip_copy = CALI_CONFIGURABLE(host_tunnel_ip);
-			if (ip_void(local_ip_copy)) {
-				local_ip_copy = CALI_CONFIGURABLE(host_ip);
-			}
 			ipv6_addr_t_to_be32_4_ip(key.remote_ipv6, &dest_rt->next_hop);
-			ipv6_addr_t_to_be32_4_ip(key.local_ipv6, &local_ip_copy);
 			flags |= BPF_F_TUNINFO_IPV6;
+			size = offsetof(struct bpf_tunnel_key, local_ipv6);
 #else
 			key.remote_ipv4 = bpf_htonl(dest_rt->next_hop);
-			key.local_ipv4 = ip_void(HOST_TUNNEL_IP) ? bpf_htonl(HOST_IP) : bpf_htonl(HOST_TUNNEL_IP);
 			flags |= BPF_F_ZERO_CSUM_TX;
+			size = offsetof(struct bpf_tunnel_key, local_ipv4);
 #endif
-			size = sizeof(struct bpf_tunnel_key);
 
 			int err = bpf_skb_set_tunnel_key(ctx->skb, &key, size, flags);
 			CALI_DEBUG("bpf_skb_set_tunnel_key %d nh " IP_FMT, err, &dest_rt->next_hop);
@@ -383,9 +397,15 @@ try_fib_external:
 			.l4_protocol = state->ip_proto,
 		};
 
+		/* See the note above the matching guard in the local-dest path:
+		 * only external-client-to-local-service reply traffic gets the
+		 * mark; ordinary pod egress leaves it 0 for host source routing. */
 		if (bpf_core_field_exists(((struct bpf_fib_lookup *)0)->mark)) {
-			fib_params(ctx)->mark = EXT_TO_SVC_MARK;
-			CALI_DEBUG("FIB mark=0x%d", fib_params(ctx)->mark);
+			if (CALI_F_FROM_WEP && EXT_TO_SVC_MARK &&
+					(state->ct_result.flags & CALI_CT_FLAG_EXT_LOCAL)) {
+				fib_params(ctx)->mark = EXT_TO_SVC_MARK;
+				CALI_DEBUG("FIB mark=0x%x", fib_params(ctx)->mark);
+			}
 		}
 
 		if (state->ip_proto != IPPROTO_ICMP_46) {

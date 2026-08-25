@@ -1,4 +1,4 @@
-// Copyright (c) 2020-2025 Tigera, Inc. All rights reserved.
+// Copyright (c) 2020-2026 Tigera, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -53,6 +53,8 @@ const (
 	ChainFailsafeIn  = ChainNamePrefix + "failsafe-in"
 	ChainFailsafeOut = ChainNamePrefix + "failsafe-out"
 
+	ChainConnStateLog = ChainNamePrefix + "log-conn"
+
 	ChainNATPrerouting  = ChainNamePrefix + "PREROUTING"
 	ChainNATPostrouting = ChainNamePrefix + "POSTROUTING"
 	ChainNATOutput      = ChainNamePrefix + "OUTPUT"
@@ -63,6 +65,10 @@ const (
 
 	ChainEgressDSCP      = ChainNamePrefix + "egress-dscp"
 	IPSetIDDSCPEndpoints = "dscp-src-net"
+
+	// IPSetIDNoFlowOffload holds the IPs of endpoints whose traffic must not take the
+	// nftables flowtable fast path.
+	IPSetIDNoFlowOffload = "no-flow-offload"
 
 	IPSetIDNetworkPools         = "network-ip-pools"
 	IPSetIDNATOutgoingMasqPools = "masq-ipam-pools"
@@ -122,8 +128,6 @@ const (
 	HostFromEndpointForwardPfx = ChainNamePrefix + "fhfw-"
 
 	RPFChain = ChainNamePrefix + "rpf"
-
-	RuleHashPrefix = "cali:"
 
 	// NFLOGPrefixMaxLength is NFLOG max prefix length which is 64 characters.
 	// Ref: http://ipset.netfilter.org/iptables-extensions.man.html#lbDI
@@ -225,27 +229,8 @@ type (
 )
 
 var (
-	// AllHistoricChainNamePrefixes lists all the prefixes that we've used for chains.  Keeping
-	// track of the old names lets us clean them up.
-	AllHistoricChainNamePrefixes = []string{
-		// Current.
-		"cali-",
-
-		// Early RCs of Felix 2.1 used "cali" as the prefix for some chains rather than
-		// "cali-".  This led to name clashes with the DHCP agent, which uses "calico-" as
-		// its prefix.  We need to explicitly list these exceptions.
-		"califw-",
-		"calitw-",
-		"califh-",
-		"calith-",
-		"calipi-",
-		"calipo-",
-
-		// Pre Felix v2.1.
-		"felix-",
-	}
-	// AllHistoricIPSetNamePrefixes, similarly contains all the prefixes we've ever used for IP
-	// sets.
+	// AllHistoricIPSetNamePrefixes contains all the prefixes we've ever used for IP sets, so that
+	// we can clean up the old ones.
 	AllHistoricIPSetNamePrefixes = []string{"felix-", "cali"}
 	// LegacyV4IPSetNames contains some extra IP set names that were used in older versions of
 	// Felix and don't fit our versioned pattern.
@@ -445,6 +430,19 @@ type Config struct {
 	LogActionRateLimit      string
 	LogActionRateLimitBurst int
 
+	// LogConnectionTransitions is set when the LogConnectionTransitions config param is
+	// FirstResponseAfterLog (and the dataplane supports it).
+	LogConnectionTransitions bool
+	// LogConnectionTransitionsPrefix is the log prefix for connection transition logs; the
+	// transition suffix ("-est" etc.) is appended to it.  Used verbatim: unlike LogPrefix,
+	// %-specifiers are not substituted (the rules are shared by all policies).
+	LogConnectionTransitionsPrefix string
+	// MarkConnStateLog is the connmark bit used when LogConnectionTransitions is
+	// enabled; it means "connection matched a Log rule but no response has been seen yet".
+	// Only allocated when the feature is enabled; validate() has an explicit exception
+	// allowing it to be zero otherwise.
+	MarkConnStateLog uint32
+
 	EndpointToHostAction string
 	FilterAllowAction    string
 	MangleAllowAction    string
@@ -465,8 +463,10 @@ type Config struct {
 	BPFForceTrackPacketsFromIfaces []string
 	ServiceLoopPrevention          string
 
-	NFTablesMode    string
-	FlowLogsEnabled bool
+	NFTablesMode             string
+	NFTablesEnabled          bool
+	NFTablesFlowTableOffload bool
+	FlowLogsEnabled          bool
 
 	IstioAmbientModeEnabled bool
 	IstioDSCPMark           uint8
@@ -491,6 +491,10 @@ func (c *Config) validate() {
 		if strings.HasPrefix(fieldName, "Mark") && fieldName != "MarkNonCaliEndpoint" {
 			if c.BPFEnabled && unusedBitsInBPFMode[fieldName] {
 				log.WithField("field", fieldName).Debug("Ignoring unused field in BPF mode.")
+				continue
+			}
+			if fieldName == "MarkConnStateLog" && !c.LogConnectionTransitions {
+				// Only allocated when connection transition logging is enabled.
 				continue
 			}
 			bits := myValue.Field(i).Interface().(uint32)

@@ -1194,6 +1194,12 @@ var schemaYAML = typed.YAMLObject(`types:
     - name: logActionRateLimitBurst
       type:
         scalar: numeric
+    - name: logConnectionTransitions
+      type:
+        scalar: string
+    - name: logConnectionTransitionsPrefix
+      type:
+        scalar: string
     - name: logDebugFilenameRegex
       type:
         scalar: string
@@ -1240,6 +1246,12 @@ var schemaYAML = typed.YAMLObject(`types:
       type:
         scalar: string
     - name: nftablesFilterDenyAction
+      type:
+        scalar: string
+    - name: nftablesFlowTableDataIfacePattern
+      type:
+        scalar: string
+    - name: nftablesFlowTableOffload
       type:
         scalar: string
     - name: nftablesMangleAllowAction

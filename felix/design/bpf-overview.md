@@ -117,6 +117,17 @@ attach points Felix forces `bpf_redirect_peer` off and the FIB path
 uses plain `bpf_redirect`. See
 [bpf-tc-programs.md → Attach mechanisms](./bpf-tc-programs.md).
 
+`bpf_redirect_peer` also leaves the L2 header untouched, so the packet
+arrives addressed to the veth's host side. Ordinary pods do not care —
+the kernel has already classified it `PACKET_HOST` — but a workload
+that bridges its veth onward, such as a KubeVirt VM, drops the frame as
+`PACKET_OTHERHOST`. Those workloads, and any using ingress QoS (which
+needs the host qdisc), set `SkipRedir.Ingress`; Felix propagates it as
+`CALI_RT_SKIP_INGRESS_REDIRECT` on the route and
+`CALI_CT_FLAG_SKIP_REDIR_PEER` on the conntrack entry, pinning the flow
+to the FIB path, which does rewrite the MAC. The opt-out is the
+*destination's*, so it applies to both `from-HEP` and `from-WEP`.
+
 ### When BPF defers to the host stack
 
 BPF does not try to handle every case. It hands packets to the host
@@ -403,8 +414,9 @@ Several BPF features depend on kernel version:
 - Jump maps per TCX direction (kernel 6.12+) — the split into
   `cali_progs_ing` vs `cali_progs_egr` is the workaround ([bpf-tc-programs.md → TC program layout](./bpf-tc-programs.md)).
 - Netkit attach — used only when the workload interface is a
-  netkit device and the kernel supports the netkit attach API.
-  Felix probes at runtime (`tc.IsNetkitSupported`) and falls
+  netkit device, the kernel supports the netkit attach API, and
+  `BPFAttachType` has not selected TC or TCX outright. Felix
+  probes at runtime (`tc.IsNetkitSupported`) and falls
   back to TCX/clsact when not supported. See
   [bpf-tc-programs.md → Attach mechanisms](./bpf-tc-programs.md).
 - `bpf_redirect_neigh` availability — [bpf-host-networking.md → Host-networked workaround (bpfnat veth)](./bpf-host-networking.md)'s bpfnat turnaround falls

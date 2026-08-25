@@ -1462,6 +1462,11 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 		*out = new(int)
 		**out = **in
 	}
+	if in.LogConnectionTransitions != nil {
+		in, out := &in.LogConnectionTransitions, &out.LogConnectionTransitions
+		*out = new(LogConnectionTransitionsMode)
+		**out = **in
+	}
 	if in.IPIPEnabled != nil {
 		in, out := &in.IPIPEnabled, &out.IPIPEnabled
 		*out = new(bool)
@@ -1726,6 +1731,11 @@ func (in *FelixConfigurationSpec) DeepCopyInto(out *FelixConfigurationSpec) {
 	if in.NFTablesMode != nil {
 		in, out := &in.NFTablesMode, &out.NFTablesMode
 		*out = new(NFTablesMode)
+		**out = **in
+	}
+	if in.NFTablesFlowTableOffload != nil {
+		in, out := &in.NFTablesFlowTableOffload, &out.NFTablesFlowTableOffload
+		*out = new(NFTablesFlowTableOffload)
 		**out = **in
 	}
 	if in.NftablesRefreshInterval != nil {
